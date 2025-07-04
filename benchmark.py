@@ -47,11 +47,11 @@ if __name__ == '__main__':
     S_torch, row_max_torch, out_torch = torch_attn(query, key, value, causal_mask, dim)
 
     out, row_max, _, S = custom_flash_attn.flash_attn_fp16(query, key, value, True, True, args.version)
-#    print(_[0, 0, :10])
-#    exit()
+    
     out_flash = flash_attn.flash_attn_func(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), causal=True).transpose(1, 2)
     
     row_max = row_max.reshape(row_max.shape[0], row_max.shape[1], -1)[:, :, :n]
+
     
     # Logits check
     S_torch = torch.where(S_torch < -1e6, 0, S_torch)
@@ -61,7 +61,7 @@ if __name__ == '__main__':
     print(f'\t > Result: {torch.allclose(S_torch, S, rtol=0, atol=1e-2)} at error < {1e-2}')
     if not torch.allclose(S_torch, S, rtol=0, atol=1e-2):
         print(torch.topk(abs(S_torch.reshape(-1) - S.reshape(-1)), k=20, dim=0).values)
-     
+    
     # Row-max check
     print(f'=== Checking functionality of row max ===')
     print(f'\t > Result: {torch.allclose(row_max_torch, row_max, rtol=0, atol=1e-2)} at error < {1e-2}')
