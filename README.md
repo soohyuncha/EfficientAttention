@@ -6,6 +6,8 @@ pip install -e .
 python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 1
 # v2: WMMA instruction instead of FMA
 python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 2
+# v3: Optimization to reduce unnecessary compute & global mem. access proposed in FlashAttn-2
+python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 3
 ```
 
 ## Categorize optimization techniques
