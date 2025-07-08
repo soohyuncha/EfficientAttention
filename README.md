@@ -11,10 +11,11 @@ python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 3
 ```
 
 ## Categorize optimization techniques
-| Technique                  | V1 | V2 | V3 | V4 |
-|:--------------------------:|:--:|:--:|:--:|:--:|
-|Online softmax (FlashAttn-1)| O | O | O | O |
-|Thread-block (FlashAttn-2)  | O | O | O | O |
-|WMMA instruction            | | O | O | O |
-|Maximize shared mem. for output(FlashAttn-2)| | | O | O |
-|Vectorized load/store| | | | O |
+| Technique                  | V1 | V2 | V3 | V4 | V5 |
+|:--------------------------:|:--:|:--:|:--:|:--:|:--:|
+|Online softmax (FlashAttn-1)| O | O | O | O | O |
+|Thread-block (FlashAttn-2)  | O | O | O | O | O |
+|WMMA instruction            | | O | O | O | O |
+|Maximize shared mem. for output(FlashAttn-2)| | | O | O | O |
+|Vectorized load/store| | | | O | O |
+|Warp primitive for max/reduction| | | | | O |
