@@ -9,7 +9,7 @@ using namespace nvcuda;
 
 
 template <int NUM_THREADS, int HEAD_SIZE, int Br, int Bc>
-__global__ void flash_attn_kernel_fp16_v4(
+__global__ void flash_attn_kernel_fp16_v5(
     const __half* query, const __half* key, const __half* value,
     const int Tc, const int Tr, const int q_len, const int kv_len, const float softmax_scale,
     __half* out, float* row_max_global, float* row_exp_sum_global, float* S_global,
@@ -42,9 +42,12 @@ __global__ void flash_attn_kernel_fp16_v4(
     // Intermediate variables for online softmax
     float row_max_tile, row_max_new, row_max_prev;
     float row_exp_sum_tile, row_exp_sum_new, row_exp_sum_prev;
-    float out_tmp[HEAD_SIZE];
+    float out_tmp[HEAD_SIZE / 2];
     
     const int THREAD_GROUP_SIZE = NUM_THREADS / Br;     // 2
+    const int thread_group_id = tid / THREAD_GROUP_SIZE;    // [0, 63]
+    const int thread_group_offset = tid % THREAD_GROUP_SIZE;    // [0, 1]
+
 
     // Load Q to on-chip SRAM (vectorized load w/ 16B granularity)
 #pragma unroll
@@ -58,7 +61,7 @@ __global__ void flash_attn_kernel_fp16_v4(
     // Init. private variables
     row_max_prev = -FLT_MAX;
     row_exp_sum_prev = 0;
-    for (int i = 0; i < HEAD_SIZE; i++) {
+    for (int i = 0; i < HEAD_SIZE / 2; i++) {
         out_tmp[i] = 0;
     }
 
@@ -77,7 +80,7 @@ __global__ void flash_attn_kernel_fp16_v4(
             *Vj_fp4_ptr = *value_fp4_ptr;
         }
         __syncthreads();
-
+        
         // 2) Compute S = Q * K^T && maximum elements of j-th tile
         for (int jj = 0; jj < Bc; jj += WMMA_N) {
             wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> q_frag;
@@ -93,49 +96,39 @@ __global__ void flash_attn_kernel_fp16_v4(
             wmma::store_matrix_sync(S + (warp_id * WMMA_M) * Bc + jj, s_frag, Bc, wmma::mem_row_major);
         }
         
-        if ((lane_id < WMMA_M) && (q_blk_idx * Br + (warp_id * WMMA_M + lane_id) < q_len)) {
-            // 3) Each thread obtains "row_max" of j-th tile
-            int row_idx = warp_id * WMMA_M + lane_id;
-            row_max_tile = -FLT_MAX;
-            for (int jj = 0; jj < Bc; jj++) {
-                if (j * Bc + jj >= kv_len) {
-                    continue;
-                }
-                float sum;
-                if (q_blk_idx * Br + row_idx < j * Bc + jj) {
-                    sum = -FLT_MAX;
-                }
-                else {
-                    sum = S[row_idx * Bc + jj] * softmax_scale;
-                }
-                row_max_tile = fmaxf(row_max_tile, sum);
-                S[row_idx * Bc + jj] = sum;
-                if (debug) {
-                    S_global[(b_idx * h * q_len * kv_len) + (h_idx * q_len * kv_len) + ((q_blk_idx * Br + row_idx) * kv_len) + (j * Bc + jj)] = sum;
-                }
+        for (int i = warp_id * WMMA_M; i < (warp_id + 1) * WMMA_M; i++) {
+            // 3) Store scaled q*k^T into shared mem. of S
+            float s_ij = (q_blk_idx * Br + i < j * Bc + lane_id) ? -FLT_MAX : S[i * Bc + lane_id] * softmax_scale;
+            S[i * Bc + lane_id] = s_ij;
+            if (debug) {
+                S_global[(b_idx * h * q_len * kv_len) + (h_idx * q_len * kv_len) + ((q_blk_idx * Br + i) * kv_len) + (j * Bc + lane_id)] = s_ij;
             }
-
-            // 4) Update "row_max" of j-th tile
-            row_max_new = fmaxf(row_max_prev, row_max_tile);
+            // 4) Get "row_max" using warp primitive
+#pragma unroll
+            for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+                s_ij = fmaxf(s_ij, __shfl_xor_sync(0xFFFFFFFF, s_ij, offset));
+            }
+            // Assign thread-private variables
+            row_max_tile = s_ij;
+            float row_max_prev_i = __shfl_sync(0xFFFFFFFF, row_max_prev, (i * THREAD_GROUP_SIZE) % WARP_SIZE);
+            float row_max_new_i = fmaxf(row_max_prev_i, row_max_tile);
+            row_max_new = (thread_group_id == i) ? row_max_new_i : row_max_new;
 
             // 5) Compute e^(S - row_max)
-            row_exp_sum_tile = 0;
-            for (int jj = 0; jj < Bc; jj++) {
-                if (j * Bc + jj >= kv_len) {
-                    continue;
-                }
-                S_fp16[row_idx * Bc + jj] = __float2half(__expf(S[row_idx * Bc + jj] - row_max_new));
-                row_exp_sum_tile += __half2float(S_fp16[row_idx * Bc + jj]);
-            }
+            s_ij = __expf(S[i * Bc + lane_id] - row_max_new_i);
+            S_fp16[i * Bc + lane_id] = __float2half(s_ij);
 
-            // 6) Update "row_exp_sum" of j-th tile
-            row_exp_sum_new = row_exp_sum_prev * expf(row_max_prev - row_max_new) + row_exp_sum_tile;
+            // 6) Compute "row_exp_sum" using warp primitive
+#pragma unroll
+            for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+                s_ij += __shfl_xor_sync(0xFFFFFFFF, s_ij, offset);
+            }
+            row_exp_sum_new = (thread_group_id == i) ? row_exp_sum_prev * expf(row_max_prev - row_max_new) + s_ij : row_exp_sum_new;
         }
         
         __syncthreads();
         
         // 7) Compute O = S * V 
-
         for (int d = 0; d < HEAD_SIZE; d += WMMA_N) {
             wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> s_frag;
             wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> v_frag;
@@ -150,40 +143,34 @@ __global__ void flash_attn_kernel_fp16_v4(
             wmma::store_matrix_sync(O + (warp_id * WMMA_M) * WMMA_N, o_frag, WMMA_N, wmma::mem_row_major);
             __syncthreads();
 
-            for (int dd = 0; dd < WMMA_N; dd += 1) {
-                if ((lane_id < WMMA_M) && (q_blk_idx * Br + (warp_id * WMMA_M + lane_id) < q_len)) {
-                    int row_idx = warp_id * WMMA_M + lane_id;
-                    out_tmp[d + dd] = out_tmp[d + dd] * __expf(row_max_prev - row_max_new) + O[row_idx * WMMA_N + dd];
-                }
+            for (int dd = 0; dd < WMMA_N / THREAD_GROUP_SIZE; dd += 1) {
+                out_tmp[d / THREAD_GROUP_SIZE + dd] = out_tmp[d / THREAD_GROUP_SIZE + dd] * __expf(row_max_prev - row_max_new) + O[thread_group_id * WMMA_N + (WMMA_N / THREAD_GROUP_SIZE) * thread_group_offset + dd];
             }
             __syncthreads();
         }
 
         // 8) Update final output
-        if ((lane_id < WMMA_M) && (q_blk_idx * Br + (warp_id * WMMA_M + lane_id) < q_len)) {
-            int row_idx = warp_id * WMMA_M + lane_id;
-            if (debug) {
-                row_max_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + row_idx)] = row_max_new;
-                row_exp_sum_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + row_idx)] = row_exp_sum_new;
-            }
-            row_max_prev = row_max_new;
-            row_exp_sum_prev = row_exp_sum_new;
-            
-            // Write scaled output into global memory only at the last j-th tile (vectorized store w/ 16B granularity)
-            if (j == Tc - 1) {
-#pragma unroll
-                for (int d = 0; d < HEAD_SIZE; d += VEC_SIZE) {
-                    float4* out_fp4_ptr = reinterpret_cast<float4*>(&out[q_b_offset + q_h_offset + q_blk_offset + row_idx * HEAD_SIZE + d]);
-                    __half out_tmp_fp16[VEC_SIZE];
-#pragma unroll
-                    for (int dd = 0; dd < VEC_SIZE; dd++) {
-                        out_tmp_fp16[dd] = __float2half((1 / row_exp_sum_new) * out_tmp[d + dd]);
-                    }
-                    const float4* out_tmp_fp4_ptr = reinterpret_cast<const float4*>(&out_tmp_fp16);
-                    *out_fp4_ptr = *out_tmp_fp4_ptr;
-                }
-            }
-        }
         
+        if (debug) {
+            row_max_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + thread_group_id)] = row_max_new;
+            row_exp_sum_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + thread_group_id)] = row_exp_sum_new;
+        }
+        row_max_prev = row_max_new;
+        row_exp_sum_prev = row_exp_sum_new;
+        
+        // Write scaled output into global memory only at the last j-th tile (vectorized store w/ 16B granularity)
+        if (j == Tc - 1) {
+#pragma unroll
+            for (int d = 0; d < HEAD_SIZE; d += VEC_SIZE * THREAD_GROUP_SIZE) {
+                float4* out_fp4_ptr = reinterpret_cast<float4*>(&out[q_b_offset + q_h_offset + q_blk_offset + thread_group_id * HEAD_SIZE + d + VEC_SIZE * thread_group_offset]);
+                __half out_tmp_fp16[VEC_SIZE];
+#pragma unroll
+                for (int dd = 0; dd < VEC_SIZE; dd++) {
+                    out_tmp_fp16[dd] = __float2half((1 / row_exp_sum_new) * out_tmp[d / THREAD_GROUP_SIZE + dd]);
+                }
+                const float4* out_tmp_fp4_ptr = reinterpret_cast<const float4*>(&out_tmp_fp16);
+                *out_fp4_ptr = *out_tmp_fp4_ptr;
+            }
+        }  
     }
 }
