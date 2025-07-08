@@ -16,6 +16,7 @@ using namespace nvcuda;
 #include "flash_attn_v3.cuh"
 #include "flash_attn_v4.cuh"
 #include "flash_attn_v5.cuh"
+#include "flash_attn_v6.cuh"
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_attn_fp16(
         torch::Tensor query,        // [b, h, n, d]
@@ -125,7 +126,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
         return std::make_tuple(out, row_max, row_exp_sum, attn_score);
     }
 
-    else if (version >= 3 && version <= 5) {
+    else if (version >= 3 && version <= 6) {
         const int Bc = 32;
         const int Br = 64;
         const int Tc = ceil((float) kv_len / Bc);
@@ -194,14 +195,22 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                     debug
             );
         }
-
-
+        else if (version == 6) {
+            flash_attn_kernel_fp16_v6<NUM_THREADS, 128, Br, Bc><<<grid_dim, block_dim, sram_size>>> (
+                    reinterpret_cast<const __half*>(query.data_ptr<at::Half>()),
+                    reinterpret_cast<const __half*>(key.data_ptr<at::Half>()),
+                    reinterpret_cast<const __half*>(value.data_ptr<at::Half>()),
+                    Tc, Tr, q_len, kv_len, softmax_scale,
+                    reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+                    reinterpret_cast<float*>(row_max.data_ptr<float>()),
+                    reinterpret_cast<float*>(row_exp_sum.data_ptr<float>()),
+                    reinterpret_cast<float*>(attn_score.data_ptr<float>()),
+                    debug
+            );
+        }
 
         return std::make_tuple(out, row_max, row_exp_sum, attn_score);
     }
-
-    
-
 
 }
 

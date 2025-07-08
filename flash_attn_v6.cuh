@@ -9,7 +9,7 @@ using namespace nvcuda;
 
 
 template <int NUM_THREADS, int HEAD_SIZE, int Br, int Bc>
-__global__ void flash_attn_kernel_fp16_v5(
+__global__ void flash_attn_kernel_fp16_v6(
     const __half* query, const __half* key, const __half* value,
     const int Tc, const int Tr, const int q_len, const int kv_len, const float softmax_scale,
     __half* out, float* row_max_global, float* row_exp_sum_global, float* S_global,
@@ -66,7 +66,8 @@ __global__ void flash_attn_kernel_fp16_v5(
     }
 
     // Iterate tiles over KV dimension
-    for (int j = 0; j < Tc; j++) {
+    const int kv_blk_idx_max = ((q_blk_idx + 1) * Br) / Bc;
+    for (int j = 0; j < kv_blk_idx_max; j++) {
         const int kv_blk_offset = j * Bc * HEAD_SIZE;
         // 1) Load K_j, V_j to on-chip SRAM (vectorized load w/ 16B granularity)
 #pragma unroll
@@ -158,7 +159,7 @@ __global__ void flash_attn_kernel_fp16_v5(
         row_exp_sum_prev = row_exp_sum_new;
         
         // Write scaled output into global memory only at the last j-th tile (vectorized store w/ 16B granularity)
-        if (j == Tc - 1) {
+        if (j == kv_blk_idx_max - 1) {
 #pragma unroll
             for (int d = 0; d < HEAD_SIZE; d += VEC_SIZE * THREAD_GROUP_SIZE) {
                 float4* out_fp4_ptr = reinterpret_cast<float4*>(&out[q_b_offset + q_h_offset + q_blk_offset + thread_group_id * HEAD_SIZE + d + VEC_SIZE * thread_group_offset]);
