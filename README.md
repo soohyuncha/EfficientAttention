@@ -2,20 +2,16 @@
 
 ```
 pip install -e .
-# v1: online softmax, thread block assignment
-python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 1
-# v2: WMMA instruction instead of FMA
-python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 2
-# v3: Optimization to reduce unnecessary compute & global mem. access proposed in FlashAttn-2
-python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 3
+python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 7
 ```
 
 ## Categorize optimization techniques
-| Technique                  | V1 | V2 | V3 | V4 | V5 |
-|:--------------------------:|:--:|:--:|:--:|:--:|:--:|
-|Online softmax (FlashAttn-1)| O | O | O | O | O |
-|Thread-block (FlashAttn-2)  | O | O | O | O | O |
-|WMMA instruction            | | O | O | O | O |
-|Maximize shared mem. for output(FlashAttn-2)| | | O | O | O |
-|Vectorized load/store| | | | O | O |
-|Warp primitive for max/reduction| | | | | O |
+|Version| Technique                  | vs Torch | vs FA-2 |
+|:-----:|:--------------------------:|:--------:|:-------:|
+|  v1  | Online softmax, thread-block assignment| 0.06x | 0.00x |
+|  v2  | WMMA instead of FMA | 0.23x | 0.02x |
+|  v3  | Shared mem. usage for intermediate results | 0.95x | 0.08x |
+|  v4  | Vectorized load/store | 1.04x | 0.08x |
+|  v5  | Warp primitive for max/reduction | 1.22x | 0.10x |
+|  v6  | Skip non-causal attention | 2.26x | 0.18x |
+|  v7  | Remove unnecessary thread sync. | 2.38x | 0.19x |
