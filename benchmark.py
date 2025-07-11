@@ -14,14 +14,18 @@ def get_causal_mask(n):
     causal_mask = torch.where(causal_mask == 1, 0, causal_mask)
     return causal_mask.unsqueeze(0).unsqueeze(0)
 
-def torch_attn(query, key, value, mask, dim):
+def torch_attn(query, key, value, mask, dim, debug):
 #    query, key, value = query.to(torch.float32), key.to(torch.float32), value.to(torch.float32)
     S = torch.matmul(query, key.transpose(2, 3)) * (1.0 / math.sqrt(dim))
     S = S + mask
-    row_max = torch.max(S, dim=-1).values
+    if debug:
+        row_max = torch.max(S, dim=-1).values.to(torch.float32)
+    else:
+        row_max = None
     logits = F.softmax(S, dim=-1)
     out = torch.matmul(logits, value)
-    return S.to(torch.float32), row_max.to(torch.float32), out
+
+    return S.to(torch.float32), row_max, out
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -44,15 +48,22 @@ if __name__ == '__main__':
     value = torch.rand((b, h, n, dim), dtype=torch.float16, device='cuda:0')
     causal_mask = get_causal_mask(n)
 
-    S_torch, row_max_torch, out_torch = torch_attn(query, key, value, causal_mask, dim)
+    S_torch, row_max_torch, out_torch = torch_attn(query, key, value, causal_mask, dim, debug=True)
 
-    out, row_max, _, S = custom_flash_attn.flash_attn_fp16(query, key, value, True, True, args.version)
+    out, row_max, S = custom_flash_attn.flash_attn_fp16(query, key, value, True, True, args.version)
     
     out_flash = flash_attn.flash_attn_func(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), causal=True).transpose(1, 2)
     
     row_max = row_max.reshape(row_max.shape[0], row_max.shape[1], -1)[:, :, :n]
-
     
+    
+#    print(torch.topk(abs(out_torch[0, 0, :32].reshape(-1) - out[0, 0, :32].reshape(-1)), k=20, dim=0))
+    
+#    print(out_torch[0, 0, :10, :5])
+#    print(out[0, 0, :10, :5])
+#    exit()
+
+
     # Logits check
     S_torch = torch.where(S_torch < -1e6, 0, S_torch)
     S = torch.where(S < -1e6, 0, S)
@@ -88,7 +99,7 @@ if __name__ == '__main__':
         s = time.time()
         
         torch.cuda.nvtx.range_push("Torch")
-        S_torch, row_max_torch, out_torch = torch_attn(query, key, value, causal_mask, dim)
+        S_torch, row_max_torch, out_torch = torch_attn(query, key, value, causal_mask, dim, debug=False)
         torch.cuda.nvtx.range_pop()
 
         torch.cuda.synchronize()
@@ -116,7 +127,7 @@ if __name__ == '__main__':
         s = time.time()
 
         torch.cuda.nvtx.range_push("Custom")
-        out, row_max, _, S = custom_flash_attn.flash_attn_fp16(query, key, value, False, False, args.version)
+        out, row_max, S = custom_flash_attn.flash_attn_fp16(query, key, value, False, False, args.version)
         torch.cuda.nvtx.range_pop()
 
         torch.cuda.synchronize()

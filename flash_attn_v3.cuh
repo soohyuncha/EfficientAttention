@@ -11,7 +11,7 @@ template <int NUM_THREADS, int HEAD_SIZE, int Br, int Bc>
 __global__ void flash_attn_kernel_fp16_v3(
     const __half* query, const __half* key, const __half* value,
     const int Tc, const int Tr, const int q_len, const int kv_len, const float softmax_scale,
-    __half* out, float* row_max_global, float* row_exp_sum_global, float* S_global,
+    __half* out, float* row_max_global, float* S_global,
     bool debug
 ) {
     const int b_idx = blockIdx.x;
@@ -161,7 +161,6 @@ __global__ void flash_attn_kernel_fp16_v3(
             int row_idx = warp_id * WMMA_M + lane_id;
             if (debug) {
                 row_max_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + row_idx)] = row_max_new;
-                row_exp_sum_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + row_idx)] = row_exp_sum_new;
             }
             row_max_prev = row_max_new;
             row_exp_sum_prev = row_exp_sum_new;

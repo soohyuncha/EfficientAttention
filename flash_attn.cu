@@ -17,8 +17,9 @@ using namespace nvcuda;
 #include "flash_attn_v4.cuh"
 #include "flash_attn_v5.cuh"
 #include "flash_attn_v6.cuh"
+#include "flash_attn_v7.cuh"
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_attn_fp16(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> flash_attn_fp16(
         torch::Tensor query,        // [b, h, n, d]
         torch::Tensor key,          // [b, h, n, d]
         torch::Tensor value,        // [b, h, n, d]
@@ -78,7 +79,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                 debug
         );
 
-        return std::make_tuple(out, row_max, row_exp_sum, attn_score);
+        return std::make_tuple(out, row_max, attn_score);
     }
 
     else if (version == 2) {
@@ -123,10 +124,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                 debug
         );
 
-        return std::make_tuple(out, row_max, row_exp_sum, attn_score);
+        return std::make_tuple(out, row_max, attn_score);
     }
 
-    else if (version >= 3 && version <= 6) {
+    else if (version >= 3 && version <= 7) {
         const int Bc = 32;
         const int Br = 64;
         const int Tc = ceil((float) kv_len / Bc);
@@ -136,7 +137,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
         auto out = torch::zeros_like(query);        // [b, h, n, d]
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, 0);
         auto row_max = torch::full({b, h, Tr, Br}, -std::numeric_limits<float>::max(), options);    // [b, h, Tr, Br]; Initialize as -inf
-        auto row_exp_sum = torch::zeros({b, h, Tr, Br}, options);      // [b, h, Tr, Br]; Initialize as zero
         torch::Tensor attn_score = torch::empty({b, h, q_len, kv_len}, options);
 
         int max_sram_size, sram_size;
@@ -164,7 +164,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                     Tc, Tr, q_len, kv_len, softmax_scale,
                     reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
                     reinterpret_cast<float*>(row_max.data_ptr<float>()),
-                    reinterpret_cast<float*>(row_exp_sum.data_ptr<float>()),
                     reinterpret_cast<float*>(attn_score.data_ptr<float>()),
                     debug
             );
@@ -177,7 +176,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                     Tc, Tr, q_len, kv_len, softmax_scale,
                     reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
                     reinterpret_cast<float*>(row_max.data_ptr<float>()),
-                    reinterpret_cast<float*>(row_exp_sum.data_ptr<float>()),
                     reinterpret_cast<float*>(attn_score.data_ptr<float>()),
                     debug
             );
@@ -190,7 +188,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                     Tc, Tr, q_len, kv_len, softmax_scale,
                     reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
                     reinterpret_cast<float*>(row_max.data_ptr<float>()),
-                    reinterpret_cast<float*>(row_exp_sum.data_ptr<float>()),
                     reinterpret_cast<float*>(attn_score.data_ptr<float>()),
                     debug
             );
@@ -203,13 +200,25 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> flash_att
                     Tc, Tr, q_len, kv_len, softmax_scale,
                     reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
                     reinterpret_cast<float*>(row_max.data_ptr<float>()),
-                    reinterpret_cast<float*>(row_exp_sum.data_ptr<float>()),
+                    reinterpret_cast<float*>(attn_score.data_ptr<float>()),
+                    debug
+            );
+        }
+        else if (version == 7) {
+            flash_attn_kernel_fp16_v7<NUM_THREADS, 128, Br, Bc><<<grid_dim, block_dim, sram_size>>> (
+                    reinterpret_cast<const __half*>(query.data_ptr<at::Half>()),
+                    reinterpret_cast<const __half*>(key.data_ptr<at::Half>()),
+                    reinterpret_cast<const __half*>(value.data_ptr<at::Half>()),
+                    Tc, Tr, q_len, kv_len, softmax_scale,
+                    reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+                    reinterpret_cast<float*>(row_max.data_ptr<float>()),
                     reinterpret_cast<float*>(attn_score.data_ptr<float>()),
                     debug
             );
         }
 
-        return std::make_tuple(out, row_max, row_exp_sum, attn_score);
+
+        return std::make_tuple(out, row_max, attn_score);
     }
 
 }

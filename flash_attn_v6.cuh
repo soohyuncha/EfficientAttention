@@ -12,7 +12,7 @@ template <int NUM_THREADS, int HEAD_SIZE, int Br, int Bc>
 __global__ void flash_attn_kernel_fp16_v6(
     const __half* query, const __half* key, const __half* value,
     const int Tc, const int Tr, const int q_len, const int kv_len, const float softmax_scale,
-    __half* out, float* row_max_global, float* row_exp_sum_global, float* S_global,
+    __half* out, float* row_max_global, float* S_global,
     bool debug
 ) {
     const int b_idx = blockIdx.x;
@@ -61,7 +61,8 @@ __global__ void flash_attn_kernel_fp16_v6(
     // Init. private variables
     row_max_prev = -FLT_MAX;
     row_exp_sum_prev = 0;
-    for (int i = 0; i < HEAD_SIZE / 2; i++) {
+#pragma unroll
+    for (int i = 0; i < HEAD_SIZE / THREAD_GROUP_SIZE; i++) {
         out_tmp[i] = 0;
     }
 
@@ -142,8 +143,9 @@ __global__ void flash_attn_kernel_fp16_v6(
                 wmma::mma_sync(o_frag, s_frag, v_frag, o_frag);
             }
             wmma::store_matrix_sync(O + (warp_id * WMMA_M) * WMMA_N, o_frag, WMMA_N, wmma::mem_row_major);
-            __syncthreads();
+//            __syncthreads();
 
+#pragma unroll
             for (int dd = 0; dd < WMMA_N / THREAD_GROUP_SIZE; dd += 1) {
                 out_tmp[d / THREAD_GROUP_SIZE + dd] = out_tmp[d / THREAD_GROUP_SIZE + dd] * __expf(row_max_prev - row_max_new) + O[thread_group_id * WMMA_N + (WMMA_N / THREAD_GROUP_SIZE) * thread_group_offset + dd];
             }
@@ -153,7 +155,6 @@ __global__ void flash_attn_kernel_fp16_v6(
         // 8) Update final output 
         if (debug) {
             row_max_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + thread_group_id)] = row_max_new;
-            row_exp_sum_global[(b_idx * h * q_len) + (h_idx * q_len) + (q_blk_idx * Br + thread_group_id)] = row_exp_sum_new;
         }
         row_max_prev = row_max_new;
         row_exp_sum_prev = row_exp_sum_new;
