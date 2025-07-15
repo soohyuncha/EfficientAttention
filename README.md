@@ -1,11 +1,15 @@
 # EfficientAttention
 
 ```
-pip install -e .
-python benchmark.py --b 8 --h 32 --n 1024 --dim 128 --version 7
+pip install -e csrc
+python benchmark_prefill.py --b 8 --h 32 --n 1024 --dim 128 --num_tests 10
 ```
+## Achieved TFLOPS for prefill attention
+| PyTorch | FA2 <br>(CUDA, Library) | FA2 <br>(CUDA, w/o CuTe) | FA2 <br>(Triton) | Ideal |
+|:-------:|:-------------------:|:--------------------:|:------:|:-----:|
+| 6.9 | 154.1 | 27.0 | 110.1 | 165.2 |
 
-## Categorize optimization techniques
+## Categorize optimization techniques (CUDA)
 |Version| Technique                  | vs Torch | vs FA-2 |
 |:-----:|:--------------------------:|:--------:|:-------:|
 |  v1  | Online softmax, thread-block assignment| 0.06x | 0.00x |
