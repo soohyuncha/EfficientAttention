@@ -11,6 +11,8 @@ import time
 import triton
 import triton.language as tl
 
+import numpy as np
+
 DTYPE=torch.float16
 DEVICE="cuda:0"
 
@@ -86,18 +88,6 @@ def bench_flash_attention(query, key, value, BATCH, H, N_CTX, HEAD_DIM, causal, 
         exit()
     print()
     
-    # Warmup
-    for i in range(3):
-        p = torch.matmul(query, key.transpose(2, 3)) * (1.0 / math.sqrt(HEAD_DIM))
-        p = p + causal_mask
-        p = torch.softmax(p.float(), dim = -1).to(torch.float16)
-        ref_out_torch = torch.matmul(p, value)
-
-        ref_out_fa2 = flash_attn.flash_attn_func(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), causal=True).transpose(1, 2)
-
-        out_custom_cuda, _, _ = custom_flash_attn.flash_attn_fp16(query, key, value, False, False, ver)
-
-        out_triton, s_triton, m_triton = triton_flash_attn_prefill(query, key, value, causal, warp_specialize, False)
 
     # Compute FLOPs
     flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
@@ -107,55 +97,78 @@ def bench_flash_attention(query, key, value, BATCH, H, N_CTX, HEAD_DIM, causal, 
     total_tflops = total_flops / (10**12)
 
     # Profile starts!
-
+    NUM_WARMUP = 3
     # 1) Torch
-    torch.cuda.synchronize()
-    s = time.time()
-    for i in range(NUM_TESTS):
+    torch_latency = []
+    for i in range(NUM_WARMUP + NUM_TESTS):
+        torch.cuda.synchronize()
+        s = time.time()
+
         p = torch.matmul(query, key.transpose(2, 3)) * (1.0 / math.sqrt(HEAD_DIM))
         p = p + causal_mask
         p = torch.softmax(p.float(), dim = -1).to(torch.float16)
         ref_out_torch = torch.matmul(p, value)
-    torch.cuda.synchronize()
-    e = time.time()
-    torch_latency = ((e - s) * (10**3)) / NUM_TESTS
+
+        torch.cuda.synchronize()
+        e = time.time()
+        if i >= NUM_WARMUP:
+            torch_latency.append((e - s) * (10**3))
     
     # 2) FA-2
-    torch.cuda.synchronize()
-    s = time.time()
-    for i in range(NUM_TESTS):
-        ref_out_fa2 = flash_attn.flash_attn_func(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), causal=True).transpose(1, 2)
-    torch.cuda.synchronize()
-    e = time.time()
-    fa2_latency = ((e - s) * (10**3)) / NUM_TESTS
+    fa2_latency = []
+    for i in range(NUM_WARMUP + NUM_TESTS):
+        torch.cuda.synchronize()
+        s = time.time()
 
-    # 3) CUDA-based
-    torch.cuda.synchronize()
-    s = time.time()
-    for i in range(NUM_TESTS):
+        ref_out_fa2 = flash_attn.flash_attn_func(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), causal=True).transpose(1, 2)
+
+        torch.cuda.synchronize()
+        e = time.time()
+        if i >= NUM_WARMUP:
+            fa2_latency.append((e - s) * (10**3))
+
+    # 3) Custom CUDA-based
+    custom_cuda_latency = []
+    for i in range(NUM_WARMUP + NUM_TESTS):
+        torch.cuda.synchronize()
+        s = time.time()
+
         out_custom_cuda, _, _ = custom_flash_attn.flash_attn_fp16(query, key, value, False, False, ver)
-    torch.cuda.synchronize()
-    e = time.time()
-    custom_cuda_latency = ((e - s) * (10**3)) / NUM_TESTS
+
+        torch.cuda.synchronize()
+        e = time.time()
+        if i >= NUM_WARMUP:
+            custom_cuda_latency.append((e - s) * (10**3))
 
     # 4) Triton-based
-    torch.cuda.synchronize()
-    s = time.time()
-    for i in range(NUM_TESTS):
+    triton_latency = []
+    for i in range(NUM_WARMUP + NUM_TESTS):
+        torch.cuda.synchronize()
+        s = time.time()
+
         out_triton, s_triton, m_triton = triton_flash_attn_prefill(query, key, value, causal, warp_specialize, False)
-    torch.cuda.synchronize()
-    e = time.time()
-    triton_latency = ((e - s) * (10**3)) / NUM_TESTS
+
+        torch.cuda.synchronize()
+        e = time.time()
+        if i >= NUM_WARMUP:
+            triton_latency.append((e - s) * (10**3))
+
 
     print("=========================")
     print("Profile result")
     print("=========================")
     print(f"> Ideal: {(total_tflops / 165.2) * 1000: .2f} ms \t 165.2 TFLOPS")
-    print(f"> Torch: {torch_latency: .3f} ms \t {total_tflops / (torch_latency / (10**3)): .2f} TFLOPS")
-    print(f"> FA-2 (CUDA): {fa2_latency: .3f} ms \t {total_tflops / (fa2_latency / (10**3)): .2f} TFLOPS")
-    print(f"> Custom (CUDA): {custom_cuda_latency: .3f} ms \t {total_tflops / (custom_cuda_latency / (10**3)): .2f} TFLOPS")
-    print(f"> Triton: {triton_latency: .3f} ms \t {total_tflops / (triton_latency / (10**3)): .2f} TFLOPS")
+    print(f"> Mean")
+    print(f"\t > Torch: {np.mean(torch_latency): .3f} ms \t {total_tflops / (np.mean(torch_latency) / (10**3)): .2f} TFLOPS")
+    print(f"\t > FA-2 (CUDA): {np.mean(fa2_latency): .3f} ms \t {total_tflops / (np.mean(fa2_latency) / (10**3)): .2f} TFLOPS")
+    print(f"\t > Custom (CUDA): {np.mean(custom_cuda_latency): .3f} ms \t {total_tflops / (np.mean(custom_cuda_latency) / (10**3)): .2f} TFLOPS")
+    print(f"\t > Triton: {np.mean(triton_latency): .3f} ms \t {total_tflops / (np.mean(triton_latency) / (10**3)): .2f} TFLOPS")
 
+    print(f"> Median")
+    print(f"\t > Torch: {np.median(torch_latency): .3f} ms \t {total_tflops / (np.median(torch_latency) / (10**3)): .2f} TFLOPS")
+    print(f"\t > FA-2 (CUDA): {np.median(fa2_latency): .3f} ms \t {total_tflops / (np.median(fa2_latency) / (10**3)): .2f} TFLOPS")
+    print(f"\t > Custom (CUDA): {np.median(custom_cuda_latency): .3f} ms \t {total_tflops / (np.median(custom_cuda_latency) / (10**3)): .2f} TFLOPS")
+    print(f"\t > Triton: {np.median(triton_latency): .3f} ms \t {total_tflops / (np.median(triton_latency) / (10**3)): .2f} TFLOPS")
 
 
 
