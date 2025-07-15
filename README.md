@@ -3,6 +3,7 @@
 ```
 pip install -e csrc
 python benchmark_prefill.py --b 8 --h 32 --n 1024 --dim 128 --num_tests 10
+python benchmark_tree.py --b 8 --h 32 --n 1024 --dim 128 --tree_size 64 --num_tests 10
 ```
 ## Achieved TFLOPS for prefill attention
 | PyTorch | FA2 <br>(CUDA, Library) | FA2 <br>(CUDA, w/o CuTe) | FA2 <br>(Triton) | Ideal |
