@@ -52,29 +52,38 @@ def _attn_fwd_inner_v1(
 
     k_blk_ptr = tl.advance(k_blk_ptr, (lo, 0))
     v_blk_ptr = tl.advance(v_blk_ptr, (lo, 0))
-
-#    if debug:
-#        tl.store(QQ_ptr + offs_m[:, None] * HEAD_DIM + tl.arange(0, HEAD_DIM)[None, :], q.to(tl.float32))
+    
+    mask_m = offs_m < TREE_SIZE
 
     # loop over k, v and update accumulator
     for start_n in tl.range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
+        if STAGE == 1:
+            mask_n = (start_n + offs_n) < N_CTX
+        else:
+            mask_n = (start_n + offs_n) < (N_CTX + TREE_SIZE)
+        mask_mn = mask_m[:, None] & mask_n[None, :]
         #################################
         # 1) Compute Q*k^T
         #################################
         k = tl.load(k_blk_ptr).T            # [BLOCK_N, HEAD_DIM] -> [HEAD_DIM, BLOCK_N]
-        mask = tl.load(mask_ptr + offs_m[:, None] * (N_CTX + TREE_SIZE) + (offs_n[None, :] + start_n))        # [BLOCK_M, BLOCK_N]; 1 valid, 0 invalid
-        qk = tl.dot(q, k)
-
-        # Apply mask operation only for the last few "tree" blocks
         if STAGE == 1:
+            qk = tl.dot(q, k)
             qk = qk * qk_scale
+            qk = tl.where(mask_n[None, :], qk, -float("inf"))           # Out-of-bound
+
         else:
-            qk = qk * qk_scale + tl.where(mask, 0, -float("inf"))
+            # [BLOCK_M, BLOCK_N]; 1 valid, 0 invalid
+            mask = tl.load(
+                    mask_ptr + offs_m[:, None] * (N_CTX + TREE_SIZE) + (offs_n[None, :] + start_n)
+                    )
+            qk = tl.dot(q, k)
+            qk = qk * qk_scale + tl.where(mask, 0, -float("inf"))       # Tree mask
+            qk = tl.where(mask_n[None, :], qk, -float("inf"))           # Out-of-bound
 
         if debug:
             s_indices = offs_m[:, None] * (N_CTX + TREE_SIZE) + (offs_n[None, :] + start_n)
-            tl.store(s_ptr + s_indices, qk)
+            tl.store(s_ptr + s_indices, qk, mask=mask_mn)
 
         
         #################################
@@ -206,8 +215,10 @@ def _attn_fwd_v1(q, k, v, attn_mask,
     # epilogue
     o_block = o_block / l_i[:, None]
     m_ptrs = M + bh_idx * TREE_SIZE + offs_m
-    tl.store(m_ptrs, m_i)
-    tl.store(o_block_ptr, o_block.to(tl.float16))
+
+    mask_m = offs_m < TREE_SIZE
+    tl.store(m_ptrs, m_i, mask=mask_m)
+    tl.store(o_block_ptr, o_block.to(tl.float16), boundary_check=(0,))
 
 
 
