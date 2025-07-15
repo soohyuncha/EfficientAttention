@@ -7,8 +7,13 @@ python benchmark_tree.py --b 8 --h 32 --n 1024 --dim 128 --tree_size 64 --num_te
 ```
 ## Achieved TFLOPS for prefill attention
 | PyTorch | FA2 <br>(CUDA, Library) | FA2 <br>(CUDA, w/o CuTe) | FA2 <br>(Triton) | Ideal |
-|:-------:|:-------------------:|:--------------------:|:------:|:-----:|
+|:-------:|:-----------------------:|:------------------------:|:----------------:|:-----:|
 | 6.9 | 154.1 | 27.0 | 110.1 | 165.2 |
+
+## Achieved GB/s for tree attention
+| PyTorch | FA2 <br>(CUDA, Library) | FA2 <br>(Triton) | Ideal |
+|:-------:|:-----------------------:|:----------------:|:-----:|
+| 194| 806 | 782 | 1008 |
 
 ## Categorize optimization techniques (CUDA)
 |Version| Technique                  | vs Torch | vs FA-2 |
